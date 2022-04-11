@@ -1,9 +1,12 @@
-from socket import *
+import socket
+from socket import AF_INET, SOCK_RAW, getprotobyname, gethostbyname, htons
 import os
 import sys
 import struct
 import time
 import select
+import statistics
+import math
 import binascii
 # Should use stdev
 
@@ -33,28 +36,37 @@ def checksum(string):
     return answer
 
 
-
 def receiveOnePing(mySocket, ID, timeout, destAddr):
     timeLeft = timeout
+
+    recPacket = bytes()
 
     while 1:
         startedSelect = time.time()
         whatReady = select.select([mySocket], [], [], timeLeft)
-        howLongInSelect = (time.time() - startedSelect)
+        end_time = time.time()
+        howLongInSelect = (end_time - startedSelect)
         if whatReady[0] == []:  # Timeout
-            return "Request timed out."
+            raise RuntimeError("Request timed out.")
 
         timeReceived = time.time()
-        recPacket, addr = mySocket.recvfrom(1024)
+        buffer, addr = mySocket.recvfrom(1024)
 
         # Fill in start
 
         # Fetch the ICMP header from the IP packet
+        recPacket += buffer
+        if len(recPacket) >= 16:
+            break
 
         # Fill in end
         timeLeft = timeLeft - howLongInSelect
         if timeLeft <= 0:
-            return "Request timed out."
+            raise RuntimeError("Request timed out.")
+
+    # skip IP header [why is it here?]
+    (htype, hcode, hchecksum, hid, hseq, htime) = struct.unpack('bbHHhd', recPacket[20:])
+    return end_time - htime
 
 
 def sendOnePing(mySocket, destAddr, ID):
@@ -76,12 +88,10 @@ def sendOnePing(mySocket, destAddr, ID):
     else:
         myChecksum = htons(myChecksum)
 
-
     header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
     packet = header + data
 
     mySocket.sendto(packet, (destAddr, 1))  # AF_INET address must be tuple, not str
-
 
     # Both LISTS and TUPLES consist of a number of objects
     # which can be referenced by their position number within the object.
@@ -89,13 +99,19 @@ def sendOnePing(mySocket, destAddr, ID):
 def doOnePing(destAddr, timeout):
     icmp = getprotobyname("icmp")
 
-
     # SOCK_RAW is a powerful socket type. For more details:   https://sock-raw.org/papers/sock_raw
-    mySocket = socket(AF_INET, SOCK_RAW, icmp)
+    mySocket = socket.socket(AF_INET, SOCK_RAW, icmp)
 
     myID = os.getpid() & 0xFFFF  # Return the current process i
     sendOnePing(mySocket, destAddr, myID)
-    delay = receiveOnePing(mySocket, myID, timeout, destAddr)
+    try:
+        delay = receiveOnePing(mySocket, myID, timeout, destAddr)
+        delay *= 1000
+
+    except RuntimeError as e:
+        delay = math.nan
+        print(e)
+
     mySocket.close()
     return delay
 
@@ -103,22 +119,44 @@ def doOnePing(destAddr, timeout):
 def ping(host, timeout=1):
     # timeout=1 means: If one second goes by without a reply from the server,  	
     # the client assumes that either the client's ping or the server's pong is lost
-    dest = gethostbyname(host)
+    try:
+        dest = gethostbyname(host)
+    except socket.gaierror:
+        print(f"Ping request could not find host {host}. Please check the name and try again")
+        return ['0.0'] * 4
+
     print("Pinging " + dest + " using Python:")
     print("")
     
     #Send ping requests to a server separated by approximately one second
     #Add something here to collect the delays of each ping in a list so you can calculate vars after your ping
+    delays = []
     
-    for i in range(0,4): #Four pings will be sent (loop runs for i=0, 1, 2, 3)
+    for i in range(0, 4):  # Four pings will be sent (loop runs for i=0, 1, 2, 3)
         delay = doOnePing(dest, timeout)
         print(delay)
+        delays.append(delay)
         time.sleep(1)  # one second
         
     #You should have the values of delay for each ping here; fill in calculation for packet_min, packet_avg, packet_max, and stdev
-    #vars = [str(round(packet_min, 8)), str(round(packet_avg, 8)), str(round(packet_max, 8)),str(round(stdev(stdev_var), 8))]
 
-    return vars
+    not_nans = [d for d in delays if not math.isnan(d)] or [0.0]
+    stats = [str(round(min(not_nans), 8)),
+             str(round(statistics.mean(not_nans), 8)),
+             str(round(max(not_nans), 8)),
+             str(round(statistics.stdev(not_nans), 8))]
+
+    return stats
+
+
+def main():
+    stats = ping("google.co.il")
+    print(stats)
+    stats = ping('127.0.0.1')
+    print(stats)
+    stats = ping('no.no.e')
+    print(stats)
+
 
 if __name__ == '__main__':
-    ping("google.co.il")
+    main()
